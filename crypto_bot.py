@@ -19,7 +19,7 @@ DEEPSEEK_API_KEY = "sk-2215e54c60914769b9f40ec81ef41237"
 CRYPTO_PANIC_API_KEY = "0bb81aa8de0641b9e88d6f50db13c2aab9f286f0"
 
 # Состояния для ConversationHandler
-GENERATING_ANALYSIS, GENERATING_FORECAST = range(2)
+GENERATING_ANALYSIS, GENERATING_FORECAST, SELECTING_COIN = range(3)
 
 # Надежные источники
 SOURCES = {
@@ -31,12 +31,15 @@ SOURCES = {
     "Coinbase": "https://blog.coinbase.com/feed"
 }
 
+# Поддерживаемые валюты
+SUPPORTED_COINS = ["BTC", "ETH", "SOL", "TON", "XLM", "BNB", "LTC"]
+
 # --- Вспомогательные функции ---
 async def get_current_prices():
     """Получает актуальные цены криптовалют с CoinGecko"""
     url = "https://api.coingecko.com/api/v3/simple/price"
     params = {
-        "ids": "bitcoin,ethereum,solana",
+        "ids": "bitcoin,ethereum,solana,toncoin,stellar,binancecoin,litecoin",
         "vs_currencies": "usd",
         "include_market_cap": "false",
         "include_24hr_vol": "false",
@@ -44,33 +47,36 @@ async def get_current_prices():
         "include_last_updated_at": "true"
     }
     
+    coin_mapping = {
+        "bitcoin": "BTC",
+        "ethereum": "ETH",
+        "solana": "SOL",
+        "toncoin": "TON",
+        "stellar": "XLM",
+        "binancecoin": "BNB",
+        "litecoin": "LTC"
+    }
+    
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params, timeout=10) as response:
                 if response.status == 200:
                     data = await response.json()
-                    return {
-                        "BTC": {
-                            "price": data["bitcoin"]["usd"],
-                            "change": data["bitcoin"]["usd_24h_change"]
-                        },
-                        "ETH": {
-                            "price": data["ethereum"]["usd"],
-                            "change": data["ethereum"]["usd_24h_change"]
-                        },
-                        "SOL": {
-                            "price": data["solana"]["usd"],
-                            "change": data["solana"]["usd_24h_change"]
-                        }
-                    }
+                    result = {}
+                    for coin_id, coin_data in data.items():
+                        symbol = coin_mapping.get(coin_id)
+                        if symbol:
+                            result[symbol] = {
+                                "price": coin_data["usd"],
+                                "change": coin_data.get("usd_24h_change", 0)
+                            }
+                    return result
     except Exception as e:
         logging.error(f"CoinGecko API error: {str(e)[:200]}")
     
     # Fallback в случае ошибки
     return {
-        "BTC": {"price": "N/A", "change": 0},
-        "ETH": {"price": "N/A", "change": 0},
-        "SOL": {"price": "N/A", "change": 0}
+        coin: {"price": "N/A", "change": 0} for coin in SUPPORTED_COINS
     }
 
 def format_price_change(change):
@@ -179,7 +185,7 @@ async def generate_full_analysis(news: list) -> str:
         hours_ago = time_diff.total_seconds() // 3600
         time_info = f"{int(hours_ago)} ч. назад" if hours_ago < 24 else item['published'].strftime('%d.%m.%Y')
         
-        context += f"{i}. {item['title']} ({item['source']} - {time_info})\n"
+        context += f"{i}. [{item['title']}]({item['link']}) ({item['source']} - {time_info})\n"
     
     # Создаем промт для DeepSeek с явным указанием даты и цен
     prompt = (
@@ -237,14 +243,85 @@ async def generate_weekly_forecast(news: list) -> str:
     
     return price_block + "\n" + await analyze_with_deepseek(prompt)
 
+async def generate_coin_analysis(coin: str, news: list) -> str:
+    """Генерирует анализ и прогноз для конкретной валюты"""
+    # Получаем актуальные цены
+    prices = await get_current_prices()
+    coin_price = prices.get(coin, {"price": "N/A", "change": 0})
+    current_date = datetime.now().strftime("%d %B %Y")
+    next_week = (datetime.now() + timedelta(days=7)).strftime("%d %B %Y")
+    
+    # Форматируем блок с ценой
+    price = f"${coin_price['price']:,}" if isinstance(coin_price['price'], (int, float)) else coin_price['price']
+    change = format_price_change(coin_price.get('change', 0))
+    price_block = f"💰 *Текущая цена {coin}:* {price} {change}\n"
+    
+    # Фильтруем новости, относящиеся к выбранной валюте
+    coin_news = [item for item in news if coin.lower() in item['title'].lower()]
+    
+    # Формируем контекст новостей
+    context = f"📰 *Свежие новости по {coin}:*\n\n"
+    news_links = []  # Сохраняем ссылки для добавления в конце
+    
+    if coin_news:
+        for i, item in enumerate(coin_news[:5], 1):
+            time_diff = datetime.utcnow() - item['published']
+            hours_ago = time_diff.total_seconds() // 3600
+            time_info = f"{int(hours_ago)} ч. назад" if hours_ago < 24 else item['published'].strftime('%d.%m.%Y')
+            
+            # Форматируем как ссылку
+            context += f"{i}. [{item['title']}]({item['link']}) ({item['source']} - {time_info})\n"
+            news_links.append(item['link'])
+    else:
+        context += "Новостей по этой валюте за последние 24 часа не найдено.\n"
+    
+    # Создаем промт для DeepSeek
+    prompt = (
+        f"Ты профессиональный криптоаналитик. Сегодня {current_date}. "
+        f"Текущая цена {coin}: {price} (изменение за 24ч: {coin_price.get('change', 0):.2f}%)\n\n"
+        f"Проанализируй новости, связанные с {coin}, и сделай прогноз на ближайшую неделю ({current_date} - {next_week}).\n\n"
+        f"{context}\n\n"
+        "Структура отчета (максимум 300 слов):\n"
+        "1. Ключевые события, влияющие на цену\n"
+        "2. Технический анализ (тренды, уровни поддержки/сопротивления)\n"
+        "3. Прогноз цены на неделю\n"
+        "4. Рекомендации для трейдеров\n\n"
+        "Будь конкретным и информативным. Используй только актуальные данные."
+    )
+    
+    analysis = await analyze_with_deepseek(prompt)
+    
+    # Добавляем ссылки на статьи в конце
+    if news_links:
+        analysis += "\n\n🔍 *Источники новостей:*\n"
+        for i, link in enumerate(news_links[:5], 1):
+            analysis += f"{i}. [Статья {i}]({link})\n"
+    
+    return price_block + "\n" + analysis
+
 # --- Обработчики Telegram ---
 def create_main_menu():
     """Создает клавиатуру главного меню"""
     keyboard = [
         [InlineKeyboardButton("📈 Анализ за 24ч", callback_data="daily")],
         [InlineKeyboardButton("🔮 Прогноз на неделю", callback_data="weekly")],
-        [InlineKeyboardButton("📰 Топ-5 новостей", callback_data="news")]
+        [InlineKeyboardButton("📰 Топ-5 новостей", callback_data="news")],
+        [InlineKeyboardButton("💰 Конкретная валюта", callback_data="specific_coin")]
     ]
+    return InlineKeyboardMarkup(keyboard)
+
+def create_coin_menu():
+    """Создает меню выбора валюты"""
+    keyboard = []
+    # Разбиваем на группы по 3 монеты
+    for i in range(0, len(SUPPORTED_COINS), 3):
+        row = [
+            InlineKeyboardButton(coin, callback_data=f"coin_{coin}")
+            for coin in SUPPORTED_COINS[i:i+3]
+        ]
+        keyboard.append(row)
+    
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
     return InlineKeyboardMarkup(keyboard)
 
 def create_cancel_button():
@@ -269,6 +346,54 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     await query.edit_message_text(
         text="Операция отменена. Выберите действие:",
+        reply_markup=create_main_menu()
+    )
+    return ConversationHandler.END
+
+async def specific_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик выбора конкретной валюты"""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        text="Выберите криптовалюту для анализа:",
+        reply_markup=create_coin_menu()
+    )
+    return SELECTING_COIN
+
+async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Возврат в главное меню"""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        text="Выберите действие:",
+        reply_markup=create_main_menu()
+    )
+    return ConversationHandler.END
+
+async def coin_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Анализ конкретной валюты"""
+    query = update.callback_query
+    await query.answer()
+    coin = query.data.split('_')[1]  # Извлекаем название валюты
+    
+    # Сообщение о начале генерации
+    await query.edit_message_text(
+        text=f"⏳ Анализирую {coin}...\nСобираю новости и формирую прогноз на неделю.",
+        reply_markup=create_cancel_button()
+    )
+    
+    # Сбор новостей и генерация анализа
+    news = await fetch_news()
+    analysis = await generate_coin_analysis(coin, news)
+    
+    # Добавляем отметку времени
+    timestamp = datetime.now().strftime("%d.%m.%Y %H:%M")
+    analysis = f"🔍 *АНАЛИЗ И ПРОГНОЗ ДЛЯ {coin}:*\n\n🔄 Обновлено: {timestamp}\n\n{analysis}"
+    
+    # Отправка результата
+    await query.edit_message_text(
+        text=analysis,
+        parse_mode="Markdown",
         reply_markup=create_main_menu()
     )
     return ConversationHandler.END
@@ -371,9 +496,9 @@ async def send_scheduled_news(context: ContextTypes.DEFAULT_TYPE):
         if not (7 <= now.hour <= 21):
             return
         
-        # Получаем горячие новости не старше 2 часов
+        # Получаем горячие новости не старше 4 часов
         news = await fetch_news()
-        hot_news = [n for n in news if (datetime.utcnow() - n['published']).total_seconds() < 7200]
+        hot_news = [n for n in news if (datetime.utcnow() - n['published']).total_seconds() < 14400]
         
         if not hot_news:
             return
@@ -387,11 +512,18 @@ async def send_scheduled_news(context: ContextTypes.DEFAULT_TYPE):
             price_block += f"- {asset}: {price} {change}\n"
         
         # Формируем сообщение
-        message = "🔥 *СВЕЖИЕ НОВОСТИ ЗА ПОСЛЕДНИЕ 2 ЧАСА:*\n\n"
+        message = "🔥 *СВЕЖИЕ НОВОСТИ ЗА ПОСЛЕДНИЕ 4 ЧАСА:*\n\n"
         for i, item in enumerate(hot_news[:3], 1):
             time_diff = (datetime.utcnow() - item['published']).total_seconds()
-            minutes_ago = int(time_diff // 60)
-            message += f"{i}. [{item['title']}]({item['link']}) \n⌚ {minutes_ago} мин. назад | {item['source']}\n\n"
+            hours_ago = int(time_diff // 3600)
+            minutes_ago = int((time_diff % 3600) // 60)
+            
+            if hours_ago > 0:
+                time_info = f"{hours_ago} ч. {minutes_ago} мин. назад"
+            else:
+                time_info = f"{minutes_ago} мин. назад"
+            
+            message += f"{i}. [{item['title']}]({item['link']}) \n⌚ {time_info} | {item['source']}\n\n"
         
         # Добавляем цены
         message += "\n" + price_block
@@ -421,10 +553,16 @@ def main():
         entry_points=[
             CallbackQueryHandler(daily_analysis, pattern="^daily$"),
             CallbackQueryHandler(weekly_forecast, pattern="^weekly$"),
+            CallbackQueryHandler(specific_coin, pattern="^specific_coin$"),
         ],
         states={
             GENERATING_ANALYSIS: [CallbackQueryHandler(cancel, pattern="^cancel$")],
             GENERATING_FORECAST: [CallbackQueryHandler(cancel, pattern="^cancel$")],
+            SELECTING_COIN: [
+                CallbackQueryHandler(coin_analysis, pattern="^coin_"),
+                CallbackQueryHandler(back_to_main, pattern="^back_to_main$"),
+                CallbackQueryHandler(cancel, pattern="^cancel$")
+            ],
         },
         fallbacks=[CommandHandler("start", start)],
         per_message=False
@@ -434,15 +572,16 @@ def main():
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(show_news, pattern="^news$"))
     application.add_handler(CallbackQueryHandler(cancel, pattern="^cancel$"))
+    application.add_handler(CallbackQueryHandler(back_to_main, pattern="^back_to_main$"))
     
     # Планировщик для регулярных новостей
     job_queue = application.job_queue
     if job_queue:
-        # Запускаем задачу каждые 2 часа
+        # Запускаем задачу каждые 4 часа (14400 секунд)
         job_queue.run_repeating(
             send_scheduled_news,
-            interval=7200,  # 2 часа в секундах
-            first=10  # Запустить через 10 секунд после старта
+            interval=14400,
+            first=10
         )
     
     application.run_polling()
