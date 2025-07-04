@@ -14,9 +14,9 @@ from telegram.ext import (
 )
 
 # Конфигурация
-TELEGRAM_TOKEN = "7663504352:AAH_2M_J-m16sQERpJlPucPu8qZXdRXsjYc"
-DEEPSEEK_API_KEY = "sk-2215e54c60914769b9f40ec81ef41237"
-CRYPTO_PANIC_API_KEY = "0bb81aa8de0641b9e88d6f50db13c2aab9f286f0"
+TELEGRAM_TOKEN = "tg_bot"
+DEEPSEEK_API_KEY = "ds_api"
+CRYPTO_PANIC_API_KEY = "cp_api"
 
 # Состояния для ConversationHandler
 GENERATING_ANALYSIS, GENERATING_FORECAST, SELECTING_COIN = range(3)
